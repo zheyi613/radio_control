@@ -36,12 +36,29 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-#define MAX_MSG_LENGTH        200
-#define ADC_CHANNEL_SIZE  4
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define MAX_MSG_LENGTH        200
+#define ADC_CHANNEL_SIZE      4
+
+enum adc_val_index {
+  JOYSTICK_LX_VAL_INDEX,
+  JOYSTICK_LY_VAL_INDEX,
+  JOYSTICK_RX_VAL_INDEX,
+  JOYSTICK_RY_VAL_INDEX
+};
+
+enum input_magnification {
+  INPUT_16X,  /* value: -128 ~ 127 */
+  INPUT_8X,   /* -64 ~ 63 */
+  INPUT_4X,   /* -32 ~ 31 */
+  INPUT_2X,   /* -16 ~ 15 */
+};
+
+#define INPUT_MAGNIFICATION   INPUT_2X
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,8 +77,11 @@ uint8_t lock;
 
 union {
   struct {
-    uint8_t duty_input;
-    uint8_t dummy[31];
+    int8_t duty_input;
+    int8_t roll_input;
+    int8_t pitch_input;
+    int8_t yaw_input;
+    uint8_t dummy[28];
   } data;
   uint8_t bytes[32];
 } payload;
@@ -80,7 +100,7 @@ union {
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
+int8_t convert_val(uint16_t val);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -160,8 +180,14 @@ int main(void)
           ;
         adc_finish = 0;
 
-        if (adc_val[1] > 2300 || adc_val[1] < 1900)
-          payload.data.duty_input = (4096 - adc_val[1]) >> 4;
+        payload.data.duty_input = 
+                  convert_val(adc_val[JOYSTICK_LY_VAL_INDEX]);
+        payload.data.roll_input =
+                  -convert_val(adc_val[JOYSTICK_RX_VAL_INDEX]);
+        payload.data.pitch_input =
+                  convert_val(adc_val[JOYSTICK_RY_VAL_INDEX]);
+        payload.data.yaw_input =
+                  -convert_val(adc_val[JOYSTICK_LX_VAL_INDEX]);
 
         nrf24l01p_transmit(payload.bytes, 32);
         while (!tx_finish)
@@ -169,15 +195,18 @@ int main(void)
         tx_finish = 0;
 
         len = snprintf((char *)msg, MAX_MSG_LENGTH,
-                      "a0: %d, a1:%d, a2: %d, a3: %d, lock: %d\n\r"
-                      "input: %d, roll: %.2f, pitch: %.2f, yaw: %.2f\n\r",
-                      adc_val[0], adc_val[1], adc_val[2], adc_val[3], lock,
-                      payload.data.duty_input, ack_payload.data.roll,
-                      ack_payload.data.pitch, ack_payload.data.yaw);
+                      "duty in: %d, roll in: %d, pitch in: %d, yaw in: %d\n\r"
+                      "duty: %d, roll: %.2f, pitch: %.2f, yaw: %.2f\n\r"
+                      "lock: %d\n\r",
+                      payload.data.duty_input, payload.data.roll_input,
+                      payload.data.pitch_input, payload.data.yaw_input,
+                      ack_payload.data.duty, ack_payload.data.roll,
+                      ack_payload.data.pitch, ack_payload.data.yaw,
+                      lock);
         HAL_UART_Transmit(&huart1, msg, len, 100);
     }
   
-    HAL_Delay(100);
+    HAL_Delay(200);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -245,10 +274,22 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
       HAL_GPIO_TogglePin(BLUE_LED_GPIO_Port, BLUE_LED_Pin);
     tx_finish = 1;
   } else if (GPIO_Pin == SW_L_Pin) {
-    lock = lock ? 0 : 1;
+    
   } else if (GPIO_Pin == SW_R_Pin) {
   
   }
+}
+
+int8_t convert_val(uint16_t val)
+{
+  int8_t new_val;
+
+  if (val > 2300 || val < 1900)
+    new_val = (2048 - (int16_t)val) >> (4 + INPUT_MAGNIFICATION);
+  else
+    new_val = 0;
+
+  return new_val;
 }
 
 /* USER CODE END 4 */
