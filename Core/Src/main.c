@@ -69,29 +69,30 @@ enum input_magnification {
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint8_t msg[100], len;
+uint8_t msg[200], len;
 uint16_t adc_val[ADC_CHANNEL_SIZE];
 uint8_t adc_finish;
 uint8_t tx_finish;
-uint8_t lock;
+uint8_t unlock;
 
 union {
   struct {
-    int8_t duty_input;
+    int8_t thrust_input;
     int8_t roll_input;
     int8_t pitch_input;
     int8_t yaw_input;
-    uint8_t dummy[28];
+    uint8_t unlock;
   } data;
   uint8_t bytes[32];
 } payload;
 
 union {
   struct {
+    uint16_t thrust;
     float roll;
     float pitch;
     float yaw;
-    uint16_t duty;
+    uint8_t dummy[2];
   } data;
   uint8_t bytes[14];
 } ack_payload;
@@ -144,11 +145,16 @@ int main(void)
   /* USER CODE BEGIN 2 */
   DWT_Init();
 
+  uint8_t SW_L = 0;
+  uint8_t SW_R = 0;
+  uint8_t SW_last_state = 0;
+
   adc_finish = 0;
   tx_finish = 0;
-  lock = 0;
+  unlock = 0;
+
   memset(payload.bytes, 0, 32);
-  memset(ack_payload.bytes, 0, 14);
+  memset(ack_payload.bytes, 0, 16);
 
   struct nrf24l01p_cfg nrf24l01_param = {
     .mode = PTX_MODE,
@@ -180,7 +186,7 @@ int main(void)
           ;
         adc_finish = 0;
 
-        payload.data.duty_input = 
+        payload.data.thrust_input = 
                   convert_val(adc_val[JOYSTICK_LY_VAL_INDEX]);
         payload.data.roll_input =
                   -convert_val(adc_val[JOYSTICK_RX_VAL_INDEX]);
@@ -189,21 +195,29 @@ int main(void)
         payload.data.yaw_input =
                   -convert_val(adc_val[JOYSTICK_LX_VAL_INDEX]);
 
+        SW_L = !HAL_GPIO_ReadPin(SW_L_GPIO_Port, SW_L_Pin);
+        SW_R = !HAL_GPIO_ReadPin(SW_R_GPIO_Port, SW_R_Pin);
+        if (SW_L & SW_R & !SW_last_state)
+          unlock ^= 1;
+        payload.data.unlock = unlock;
+        SW_last_state = SW_L | SW_R;
+        
         nrf24l01p_transmit(payload.bytes, 32);
         while (!tx_finish)
           ;
         tx_finish = 0;
 
         len = snprintf((char *)msg, MAX_MSG_LENGTH,
-                      "duty in: %d, roll in: %d, pitch in: %d, yaw in: %d\n\r"
-                      "duty: %d, roll: %.2f, pitch: %.2f, yaw: %.2f\n\r"
-                      "lock: %d\n\r",
-                      payload.data.duty_input, payload.data.roll_input,
+                      "thrust in: %d, roll in: %d, pitch in: %d, yaw in: %d, "
+                      "unlock: %d\n\r"
+                      "thrust: %d, roll: %.2f, pitch: %.2f, yaw: %.2f\n\r",
+                      payload.data.thrust_input, payload.data.roll_input,
                       payload.data.pitch_input, payload.data.yaw_input,
-                      ack_payload.data.duty, ack_payload.data.roll,
-                      ack_payload.data.pitch, ack_payload.data.yaw,
-                      lock);
-        HAL_UART_Transmit(&huart1, msg, len, 100);
+                      payload.data.unlock,
+                      ack_payload.data.thrust, ack_payload.data.roll,
+                      ack_payload.data.pitch, ack_payload.data.yaw);
+        // HAL_UART_Transmit(&huart1, msg, len, 100);
+        CDC_Transmit_FS(msg, len);
     }
   
     HAL_Delay(200);
@@ -273,10 +287,6 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     else
       HAL_GPIO_TogglePin(BLUE_LED_GPIO_Port, BLUE_LED_Pin);
     tx_finish = 1;
-  } else if (GPIO_Pin == SW_L_Pin) {
-    
-  } else if (GPIO_Pin == SW_R_Pin) {
-  
   }
 }
 

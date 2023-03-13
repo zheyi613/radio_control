@@ -74,7 +74,7 @@ void MX_GPIO_Init(void)
 
   /*Configure GPIO pins : PAPin PAPin */
   GPIO_InitStruct.Pin = SW_L_Pin|SW_R_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
