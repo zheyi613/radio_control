@@ -2,4 +2,5 @@
 /.vscode/.cortex-debug.registers.state.json
 /.vscode/c_cpp_properties.json
 /.vscode/settings.json
+/.vscode/.BROWSE.*
 /build

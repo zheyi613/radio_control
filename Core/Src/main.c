@@ -41,7 +41,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define MAX_MSG_LENGTH        200
+#define MAX_MSG_LENGTH        400
 #define ADC_CHANNEL_SIZE      4
 
 enum adc_val_index {
@@ -58,7 +58,10 @@ enum input_magnification {
   INPUT_2X,   /* -16 ~ 15 */
 };
 
-#define INPUT_MAGNIFICATION   INPUT_2X
+#define INPUT_MAGNIFICATION   INPUT_4X
+
+#define PAYLOAD_WIDTH         32
+#define ACK_PAYLOAD_WIDTH     22
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -69,7 +72,7 @@ enum input_magnification {
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint8_t msg[200], len;
+uint8_t msg[MAX_MSG_LENGTH], len;
 uint16_t adc_val[ADC_CHANNEL_SIZE];
 uint8_t adc_finish;
 uint8_t tx_finish;
@@ -77,24 +80,25 @@ uint8_t unlock;
 
 union {
   struct {
-    int8_t thrust_input;
-    int8_t roll_input;
-    int8_t pitch_input;
+    int8_t throttle_input;
+    int8_t roll_target;
+    int8_t pitch_target;
     int8_t yaw_input;
     uint8_t unlock;
+    uint8_t dummy[27];
   } data;
-  uint8_t bytes[32];
+  uint8_t bytes[PAYLOAD_WIDTH];
 } payload;
 
 union {
   struct {
-    uint16_t thrust;
     float roll;
     float pitch;
     float yaw;
-    uint8_t dummy[2];
+    uint16_t motor_duty[4];
+    uint16_t throttle;
   } data;
-  uint8_t bytes[14];
+  uint8_t bytes[ACK_PAYLOAD_WIDTH];
 } ack_payload;
 /* USER CODE END PV */
 
@@ -153,18 +157,18 @@ int main(void)
   tx_finish = 0;
   unlock = 0;
 
-  memset(payload.bytes, 0, 32);
-  memset(ack_payload.bytes, 0, 16);
+  memset(payload.bytes, 0, PAYLOAD_WIDTH);
+  memset(ack_payload.bytes, 0, ACK_PAYLOAD_WIDTH);
 
   struct nrf24l01p_cfg nrf24l01_param = {
     .mode = PTX_MODE,
     .crc_len = CRC_TWO_BYTES,
     .air_data_rate = _2Mbps,
     .output_power = _0dBm,
-    .channel = 2432,
+    .channel = 2502,
     .address_width = 5,
     .auto_retransmit_count = 6,
-    .auto_retransmit_delay = 500
+    .auto_retransmit_delay = 750
   };
 
   if (nrf24l01p_init(&nrf24l01_param)) {
@@ -186,11 +190,11 @@ int main(void)
           ;
         adc_finish = 0;
 
-        payload.data.thrust_input = 
+        payload.data.throttle_input = 
                   convert_val(adc_val[JOYSTICK_LY_VAL_INDEX]);
-        payload.data.roll_input =
+        payload.data.roll_target =
                   -convert_val(adc_val[JOYSTICK_RX_VAL_INDEX]);
-        payload.data.pitch_input =
+        payload.data.pitch_target =
                   convert_val(adc_val[JOYSTICK_RY_VAL_INDEX]);
         payload.data.yaw_input =
                   -convert_val(adc_val[JOYSTICK_LX_VAL_INDEX]);
@@ -202,7 +206,7 @@ int main(void)
         payload.data.unlock = unlock;
         SW_last_state = SW_L | SW_R;
         
-        nrf24l01p_transmit(payload.bytes, 32);
+        nrf24l01p_transmit(payload.bytes, PAYLOAD_WIDTH);
         while (!tx_finish)
           ;
         tx_finish = 0;
@@ -210,12 +214,17 @@ int main(void)
         len = snprintf((char *)msg, MAX_MSG_LENGTH,
                       "thrust in: %d, roll in: %d, pitch in: %d, yaw in: %d, "
                       "unlock: %d\n\r"
-                      "thrust: %d, roll: %.2f, pitch: %.2f, yaw: %.2f\n\r",
-                      payload.data.thrust_input, payload.data.roll_input,
-                      payload.data.pitch_input, payload.data.yaw_input,
+                      "thrust: %d, roll: %.2f, pitch: %.2f, yaw: %.2f\n\r"
+                      "m1: %d, m2: %d, m3: %d, m4: %d\n\r",
+                      payload.data.throttle_input, payload.data.roll_target,
+                      payload.data.pitch_target, payload.data.yaw_input,
                       payload.data.unlock,
-                      ack_payload.data.thrust, ack_payload.data.roll,
-                      ack_payload.data.pitch, ack_payload.data.yaw);
+                      ack_payload.data.throttle, ack_payload.data.roll,
+                      ack_payload.data.pitch, ack_payload.data.yaw,
+                      ack_payload.data.motor_duty[0],
+                      ack_payload.data.motor_duty[1],
+                      ack_payload.data.motor_duty[2],
+                      ack_payload.data.motor_duty[3]);
         // HAL_UART_Transmit(&huart1, msg, len, 100);
         CDC_Transmit_FS(msg, len);
     }
@@ -294,7 +303,7 @@ int8_t convert_val(uint16_t val)
 {
   int8_t new_val;
 
-  if (val > 2300 || val < 1900)
+  if (val > 2200 || val < 1900)
     new_val = (2048 - (int16_t)val) >> (4 + INPUT_MAGNIFICATION);
   else
     new_val = 0;
