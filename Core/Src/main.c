@@ -60,8 +60,15 @@ enum input_magnification {
 
 #define INPUT_MAGNIFICATION   INPUT_4X
 
+enum PID_tuning {
+  TILT_MODE,
+  P_MODE,
+  I_MODE,
+  D_MODE
+};
+
 #define PAYLOAD_WIDTH         32
-#define ACK_PAYLOAD_WIDTH     22
+#define ACK_PAYLOAD_WIDTH     20
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -80,23 +87,29 @@ uint8_t unlock;
 
 union {
   struct {
-    int8_t throttle_input;
-    int8_t roll_target;
-    int8_t pitch_target;
-    int8_t yaw_input;
+    uint16_t throttle;
+    int16_t roll_target; /* +-180/32768 LSB */
+    int16_t pitch_target;
+    int16_t yaw_target;
+    uint8_t P;           /* 0.005 LSB */
+    uint8_t I;
+    uint8_t D;
     uint8_t unlock;
-    uint8_t dummy[27];
+    uint8_t dummy[20];
   } data;
   uint8_t bytes[PAYLOAD_WIDTH];
 } payload;
 
 union {
   struct {
-    float roll;
-    float pitch;
-    float yaw;
-    uint16_t motor_duty[4];
+    int16_t roll;
+    int16_t pitch;
+    int16_t yaw;
     uint16_t throttle;
+    uint16_t motor[4];
+    int16_t height;  /* 0.01 m LSB, range: +-327.68 m */
+    uint8_t voltage; /* 0.1 V LSB, range: 0 ~ 17.5 V */
+    uint8_t dummy;
   } data;
   uint8_t bytes[ACK_PAYLOAD_WIDTH];
 } ack_payload;
@@ -106,6 +119,7 @@ union {
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 int8_t convert_val(uint16_t val);
+void tuning(uint8_t *param, int8_t tuning_val);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -148,10 +162,31 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   DWT_Init();
+  /* payload variable */
+  int16_t tmp = 0;
+  float roll_target = 0;
+  float pitch_target = 0;
+  float yaw_target = 0;
+  float P = 0.027f;
+  float I = 0.035f;
+  float D = 0.006f;
+  /* ack payload variable */
+  uint16_t get_throttle = 0;
+  float roll = 0.f;
+  float pitch = 0.f;
+  float yaw = 0.f;
+  uint16_t motor[4] = {0};
+  float height = 0.f;
+  float voltage = 0.f;
+
+  int8_t joystick_RY_last_state = 0;
+  int8_t tuning_val = 0;
 
   uint8_t SW_L = 0;
   uint8_t SW_R = 0;
   uint8_t SW_last_state = 0;
+  uint8_t SW_R_last_state = 0;
+  uint8_t PID_tuning = 0;
 
   adc_finish = 0;
   tx_finish = 0;
@@ -159,6 +194,10 @@ int main(void)
 
   memset(payload.bytes, 0, PAYLOAD_WIDTH);
   memset(ack_payload.bytes, 0, ACK_PAYLOAD_WIDTH);
+
+  payload.data.P = (uint8_t)(P * 1000.f);
+  payload.data.I = (uint8_t)(I * 1000.f);
+  payload.data.D = (uint8_t)(D * 1000.f);
 
   struct nrf24l01p_cfg nrf24l01_param = {
     .mode = PTX_MODE,
@@ -190,17 +229,53 @@ int main(void)
           ;
         adc_finish = 0;
 
-        payload.data.throttle_input = 
-                  convert_val(adc_val[JOYSTICK_LY_VAL_INDEX]);
-        payload.data.roll_target =
-                  -convert_val(adc_val[JOYSTICK_RX_VAL_INDEX]);
-        payload.data.pitch_target =
-                  convert_val(adc_val[JOYSTICK_RY_VAL_INDEX]);
-        payload.data.yaw_input =
-                  -convert_val(adc_val[JOYSTICK_LX_VAL_INDEX]);
+        tmp = (int16_t)payload.data.throttle;
+        tmp += convert_val(adc_val[JOYSTICK_LY_VAL_INDEX]);
+        if (tmp < 0)
+          payload.data.throttle = 0;
+        else if (tmp > 1999)
+          payload.data.throttle = 1999;
+        else
+          payload.data.throttle = (uint16_t)tmp;
+
+        if (PID_tuning == TILT_MODE) {
+          roll_target = convert_val(adc_val[JOYSTICK_RX_VAL_INDEX]);
+          payload.data.roll_target = roll_target * 182.04444f;
+          pitch_target = -convert_val(adc_val[JOYSTICK_RY_VAL_INDEX]);
+          payload.data.pitch_target = pitch_target * 182.04444f;
+          yaw_target = convert_val(adc_val[JOYSTICK_LX_VAL_INDEX]);
+          payload.data.yaw_target = yaw_target * 182.04444f;
+        } else {
+          tuning_val = convert_val(adc_val[JOYSTICK_RY_VAL_INDEX]);
+          if (joystick_RY_last_state == 0) {
+            if (tuning_val > 0)
+              tuning_val = 1;
+            else if (tuning_val < 0)
+              tuning_val = -1;
+            
+            if (PID_tuning == P_MODE) {
+              tuning(&payload.data.P, tuning_val);
+              P = (float)payload.data.P * 0.001f;
+            } else if (PID_tuning == I_MODE) {
+              tuning(&payload.data.I, tuning_val);
+              I = (float)payload.data.I * 0.001f;
+            } else {
+              tuning(&payload.data.D, tuning_val);
+              D = (float)payload.data.D * 0.001f;
+            }
+          }
+          joystick_RY_last_state = tuning_val;
+        }
+        
 
         SW_L = !HAL_GPIO_ReadPin(SW_L_GPIO_Port, SW_L_Pin);
         SW_R = !HAL_GPIO_ReadPin(SW_R_GPIO_Port, SW_R_Pin);
+        if (SW_R & !SW_R_last_state) {
+          PID_tuning++;
+          if (PID_tuning > 3)
+            PID_tuning = 0;
+        }
+        SW_R_last_state = SW_R;
         if (SW_L & SW_R & !SW_last_state)
           unlock ^= 1;
         payload.data.unlock = unlock;
@@ -211,20 +286,29 @@ int main(void)
           ;
         tx_finish = 0;
 
+        get_throttle = ack_payload.data.throttle;
+        roll = (float)ack_payload.data.roll * 0.005493164f;
+        pitch = (float)ack_payload.data.pitch * 0.005493164f;
+        yaw = (float)ack_payload.data.yaw * 0.005493164f;
+        motor[0] = ack_payload.data.motor[0];
+        motor[1] = ack_payload.data.motor[1];
+        motor[2] = ack_payload.data.motor[2];
+        motor[3] = ack_payload.data.motor[3];
+        height = (float)ack_payload.data.height * 0.01f;
+        voltage = (float)ack_payload.data.voltage * 0.1f;
+
         len = snprintf((char *)msg, MAX_MSG_LENGTH,
-                      "thrust in: %d, roll in: %d, pitch in: %d, yaw in: %d, "
-                      "unlock: %d\n\r"
-                      "thrust: %d, roll: %.2f, pitch: %.2f, yaw: %.2f\n\r"
-                      "m1: %d, m2: %d, m3: %d, m4: %d\n\r",
-                      payload.data.throttle_input, payload.data.roll_target,
-                      payload.data.pitch_target, payload.data.yaw_input,
-                      payload.data.unlock,
-                      ack_payload.data.throttle, ack_payload.data.roll,
-                      ack_payload.data.pitch, ack_payload.data.yaw,
-                      ack_payload.data.motor_duty[0],
-                      ack_payload.data.motor_duty[1],
-                      ack_payload.data.motor_duty[2],
-                      ack_payload.data.motor_duty[3]);
+                      "throttle: %d, roll target: %.2f, "
+                      "pitch target: %.2f, yaw target: %.2f\n\r"
+                      "unlock: %d, mode: %d, P: %.3f, I: %.3f, D: %.3f\n\r"
+                      "get throttle: %d, roll: %.2f, pitch: %.2f, yaw: %.2f\n\r"
+                      "m1: %d, m2: %d, m3: %d, m4: %d\n\r"
+                      "height: %.2f, voltage: %.1f\n\r",
+                      payload.data.throttle, roll_target, pitch_target, yaw_target,
+                      payload.data.unlock, PID_tuning, P, I, D,
+                      get_throttle, roll, pitch, yaw,
+                      motor[0], motor[1], motor[2], motor[3],
+                      height, voltage);
         // HAL_UART_Transmit(&huart1, msg, len, 100);
         CDC_Transmit_FS(msg, len);
     }
@@ -309,6 +393,17 @@ int8_t convert_val(uint16_t val)
     new_val = 0;
 
   return new_val;
+}
+
+void tuning(uint8_t *param, int8_t tuning_val)
+{
+  int16_t tmp;
+
+  if (tuning_val == 0)
+    return;
+  tmp = (int16_t)(*param) + (int16_t)tuning_val;
+  if (tmp >= 0 && tmp < 250)
+    *param = (int8_t)tmp;
 }
 
 /* USER CODE END 4 */
