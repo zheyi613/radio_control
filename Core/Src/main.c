@@ -58,7 +58,7 @@ enum input_magnification {
   INPUT_2X,   /* -16 ~ 15 */
 };
 
-#define INPUT_MAGNIFICATION   INPUT_4X
+#define INPUT_MAGNIFICATION   INPUT_2X
 
 enum PID_tuning {
   TILT_MODE,
@@ -109,7 +109,7 @@ union {
     uint16_t motor[4];
     int16_t height;  /* 0.01 m LSB, range: +-327.68 m */
     uint8_t voltage; /* 0.1 V LSB, range: 0 ~ 17.5 V */
-    uint8_t dummy;
+    uint8_t event;
   } data;
   uint8_t bytes[ACK_PAYLOAD_WIDTH];
 } ack_payload;
@@ -178,6 +178,7 @@ int main(void)
   uint16_t motor[4] = {0};
   float height = 0.f;
   float voltage = 0.f;
+  uint8_t event = 0;
 
   int8_t joystick_RY_last_state = 0;
   int8_t tuning_val = 0;
@@ -296,24 +297,25 @@ int main(void)
         motor[3] = ack_payload.data.motor[3];
         height = (float)ack_payload.data.height * 0.01f;
         voltage = (float)ack_payload.data.voltage * 0.1f;
+        event = ack_payload.data.event;
 
         len = snprintf((char *)msg, MAX_MSG_LENGTH,
-                      "throttle: %d, roll target: %.2f, "
-                      "pitch target: %.2f, yaw target: %.2f\n\r"
+                      "throttle: %d, r target: %.2f, "
+                      "p target: %.2f, y target: %.2f\n\r"
                       "unlock: %d, mode: %d, P: %.3f, I: %.3f, D: %.3f\n\r"
-                      "get throttle: %d, roll: %.2f, pitch: %.2f, yaw: %.2f\n\r"
+                      "get throttle: %d, r: %.2f, p: %.2f, y: %.2f\n\r"
                       "m1: %d, m2: %d, m3: %d, m4: %d\n\r"
-                      "height: %.2f, voltage: %.1f\n\r",
+                      "h: %.2f, vol: %.1f, crash: %d\n\r",
                       payload.data.throttle, roll_target, pitch_target, yaw_target,
                       payload.data.unlock, PID_tuning, P, I, D,
                       get_throttle, roll, pitch, yaw,
                       motor[0], motor[1], motor[2], motor[3],
-                      height, voltage);
+                      height, voltage, event);
         // HAL_UART_Transmit(&huart1, msg, len, 100);
         CDC_Transmit_FS(msg, len);
     }
   
-    HAL_Delay(200);
+    HAL_Delay(100);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
