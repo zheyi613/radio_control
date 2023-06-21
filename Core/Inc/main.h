@@ -72,6 +72,8 @@ void Error_Handler(void);
 #define NRF_IRQ_EXTI_IRQn EXTI9_5_IRQn
 #define NRF_CSN_Pin GPIO_PIN_15
 #define NRF_CSN_GPIO_Port GPIOA
+#define TEST_Pin GPIO_PIN_9
+#define TEST_GPIO_Port GPIOB
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

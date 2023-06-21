@@ -21,6 +21,7 @@
 #include "adc.h"
 #include "dma.h"
 #include "spi.h"
+#include "tim.h"
 #include "usart.h"
 #include "usb_device.h"
 #include "gpio.h"
@@ -41,6 +42,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define TIMER_FREQ            50
 #define MAX_MSG_LENGTH        400
 #define ADC_CHANNEL_SIZE      4
 
@@ -84,8 +86,8 @@ enum {
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint8_t msg[MAX_MSG_LENGTH], len;
-uint16_t adc_val[ADC_CHANNEL_SIZE];
+uint8_t tick;
+uint32_t lost_package;
 uint8_t adc_finish;
 uint8_t tx_finish;
 uint8_t unlock;
@@ -167,8 +169,16 @@ int main(void)
   MX_SPI2_Init();
   MX_USB_DEVICE_Init();
   MX_USART1_UART_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   DWT_Init();
+
+  tick = 0;
+  uint8_t last_tick = 0;
+  lost_package = 0;
+  uint8_t msg[MAX_MSG_LENGTH];
+  uint16_t len;
+  uint16_t adc_val[ADC_CHANNEL_SIZE];
   /* payload variable */
   int16_t tmp = 0;
   float roll_target = 0;
@@ -226,19 +236,22 @@ int main(void)
       HAL_Delay(1000);  
     }
   }
-
+  HAL_TIM_Base_Start_IT(&htim3);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_val, ADC_CHANNEL_SIZE)
+    while (tick == last_tick)
+      ;
+    last_tick = tick;
+    if (tick % 5) { /* 10 Hz */
+      if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_val, ADC_CHANNEL_SIZE)
                         == HAL_OK) {
         while (!adc_finish)
           ;
         adc_finish = 0;
-
         tmp = (int16_t)payload.data.throttle;
         tmp += convert_val(adc_val[JOYSTICK_LY_VAL_INDEX]);
         if (tmp < 0)
@@ -276,8 +289,8 @@ int main(void)
           }
           joystick_RY_last_state = tuning_val;
         }
-
-        SW_L = !HAL_GPIO_ReadPin(SW_L_GPIO_Port, SW_L_Pin);
+      }
+      SW_L = !HAL_GPIO_ReadPin(SW_L_GPIO_Port, SW_L_Pin);
         SW_R = !HAL_GPIO_ReadPin(SW_R_GPIO_Port, SW_R_Pin);
         if (SW_L & !SW_L_last_state) {
           mode++;
@@ -296,41 +309,41 @@ int main(void)
           unlock ^= 1;
         payload.data.unlock = unlock;
         SW_last_state = SW_L | SW_R;
-        
-        nrf24l01p_transmit(payload.bytes, PAYLOAD_WIDTH);
-        while (!tx_finish)
-          ;
-        tx_finish = 0;
-
-        get_throttle = ack_payload.data.throttle;
-        roll = (float)ack_payload.data.roll * 0.005493164f;
-        pitch = (float)ack_payload.data.pitch * 0.005493164f;
-        yaw = (float)ack_payload.data.yaw * 0.005493164f;
-        motor[0] = ack_payload.data.motor[0];
-        motor[1] = ack_payload.data.motor[1];
-        motor[2] = ack_payload.data.motor[2];
-        motor[3] = ack_payload.data.motor[3];
-        height = (float)ack_payload.data.height * 0.01f;
-        voltage = (float)ack_payload.data.voltage * 0.1f;
-        event = ack_payload.data.event;
-
-        len = snprintf((char *)msg, MAX_MSG_LENGTH,
-                      "throttle: %d, r target: %.2f, "
-                      "p target: %.2f, y target: %.2f\n\r"
-                      "unlock: %d, set mode: %d, P: %.3f, I: %.3f, D: %.3f\n\r"
-                      "get throttle: %d, r: %.2f, p: %.2f, y: %.2f\n\r"
-                      "m1: %d, m2: %d, m3: %d, m4: %d\n\r"
-                      "h: %.2f, vol: %.1f, ctrl mode: %d, crash: %d\n\r",
-                      payload.data.throttle, roll_target, pitch_target, yaw_target,
-                      payload.data.unlock, PID_tuning, P, I, D,
-                      get_throttle, roll, pitch, yaw,
-                      motor[0], motor[1], motor[2], motor[3],
-                      height, voltage, mode, event);
-        // HAL_UART_Transmit(&huart1, msg, len, 100);
-        CDC_Transmit_FS(msg, len);
     }
-  
-    HAL_Delay(100);
+    nrf24l01p_transmit(payload.bytes, PAYLOAD_WIDTH);
+    while (!tx_finish)
+      ;
+    tx_finish = 0;
+
+    get_throttle = ack_payload.data.throttle;
+    roll = (float)ack_payload.data.roll * 0.005493164f;
+    pitch = (float)ack_payload.data.pitch * 0.005493164f;
+    yaw = (float)ack_payload.data.yaw * 0.005493164f;
+    motor[0] = ack_payload.data.motor[0];
+    motor[1] = ack_payload.data.motor[1];
+    motor[2] = ack_payload.data.motor[2];
+    motor[3] = ack_payload.data.motor[3];
+    height = (float)ack_payload.data.height * 0.01f;
+    voltage = (float)ack_payload.data.voltage * 0.1f;
+    event = ack_payload.data.event;
+
+    len = snprintf((char *)msg, MAX_MSG_LENGTH,
+                   "throttle: %d, r target: %.2f, "
+                   "p target: %.2f, y target: %.2f\n\r"
+                   "unlock: %d, set mode: %d, P: %.3f, I: %.3f, D: %.3f\n\r"
+                   "get throttle: %d, r: %.2f, p: %.2f, y: %.2f\n\r"
+                   "m1: %d, m2: %d, m3: %d, m4: %d\n\r"
+                   "h: %.2f, vol: %.1f, ctrl mode: %d, crash: %d\n\r"
+                   "lost package: %ld\n\r",
+                   payload.data.throttle, roll_target, pitch_target, yaw_target,
+                   payload.data.unlock, PID_tuning, P, I, D,
+                   get_throttle, roll, pitch, yaw,
+                   motor[0], motor[1], motor[2], motor[3],
+                   height, voltage, mode, event,
+                   lost_package);
+    // HAL_GPIO_TogglePin(TEST_GPIO_Port, TEST_Pin);
+    CDC_Transmit_FS(msg, len);
+    // HAL_GPIO_TogglePin(TEST_GPIO_Port, TEST_Pin);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -384,6 +397,15 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == htim3.Instance) {
+    tick++;
+    if (tick == TIMER_FREQ)
+      tick = 0;
+  }
+}
+
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
   adc_finish = 1;
@@ -392,10 +414,12 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == NRF_IRQ_Pin) {
-    if (nrf24l01p_tx_irq(ack_payload.bytes))
+    if (nrf24l01p_tx_irq(ack_payload.bytes)) {
       HAL_GPIO_WritePin(BLUE_LED_GPIO_Port, BLUE_LED_Pin, GPIO_PIN_RESET);
-    else
+      lost_package++;
+    } else {
       HAL_GPIO_TogglePin(BLUE_LED_GPIO_Port, BLUE_LED_Pin);
+    }
     tx_finish = 1;
   }
 }
