@@ -184,8 +184,8 @@ int main(void)
   float roll_target = 0;
   float pitch_target = 0;
   float yaw_target = 0;
-  float P = 1.35f;
-  float I = 0.3f;
+  float P = 1.2f;
+  float I = 0.1f;
   float D = 0.2f;
   uint8_t mode = NORMAL_MODE;
   /* ack payload variable */
@@ -246,6 +246,7 @@ int main(void)
     while (tick == last_tick)
       ;
     last_tick = tick;
+    HAL_GPIO_TogglePin(TEST_GPIO_Port, TEST_Pin);
     if (tick % 5) { /* 10 Hz */
       if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_val, ADC_CHANNEL_SIZE)
                         == HAL_OK) {
@@ -341,9 +342,12 @@ int main(void)
                    motor[0], motor[1], motor[2], motor[3],
                    height, voltage, mode, event,
                    lost_package);
-    // HAL_GPIO_TogglePin(TEST_GPIO_Port, TEST_Pin);
     CDC_Transmit_FS(msg, len);
-    // HAL_GPIO_TogglePin(TEST_GPIO_Port, TEST_Pin);
+    len = snprintf((char *)msg, MAX_MSG_LENGTH, "0.0,0.0,0.0,0.0,0.0,0.0,"
+                                                "%.2f,%.2f,%.2f\n",
+                                                roll, pitch, yaw);
+    HAL_UART_Transmit(&huart1, msg, len, 10);
+    HAL_GPIO_TogglePin(TEST_GPIO_Port, TEST_Pin);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
