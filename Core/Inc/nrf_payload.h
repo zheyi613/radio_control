@@ -41,8 +41,10 @@ struct ack_payload {
 
 /* Decode for payload */
 #define DECODING_RADIUS         9.587378e-5F
-#define DECODING_DEGREE         182.044444F
-#define DECODING_HEIGHT         0.001F
+#define DECODING_DEGREE         0.005493164F
+#define DECODING_HEIGHT         0.01F
+#define DECODING_VOLTAGE        0.1F
+#define DECODING_CURRENT        0.1F
 #define DECODING_CTRL_GAIN      0.05F
 
 #define DECODE_PAYLOAD_THROTTLE(src, dst)       \
@@ -53,6 +55,16 @@ struct ack_payload {
         dst = (float)(src) * DECODING_DEGREE
 #define DECODE_PAYLOAD_HEIGHT(src, dst)         \
         dst = (float)(src) * DECODING_HEIGHT
+#define DECODE_PAYLOAD_VOLTAGE(src, dst)        \
+        dst = (float)(src) * DECODING_VOLTAGE
+#define DECODE_PAYLOAD_CURRENT(src, dst)        \
+        dst = (float)(src) * DECODING_CURRENT
+#define DECODE_PAYLOAD_REC_STATUS(src, dst)     \
+        dst = (src)
+#define DECODE_PAYLOAD_GPS_SV_STATUS(src, dst)  \
+        dst = (src)
+#define DECODE_PAYLOAD_GPS_PACC(src, dst)       \
+        dst = (src)
 #define DECODE_PAYLOAD_CTRL_GAIN(src, dst)      \
         dst = (float)(src) * DECODING_CTRL_GAIN
 #define DECODE_PAYLOAD_CTRL_MODE(src, dst)      \
@@ -60,10 +72,11 @@ struct ack_payload {
 
 /* Encode for payload */
 #define ENCODING_RADIUS         10430.378F
-#define ENCODING_DEGREE         0.005493164F
+#define ENCODING_DEGREE         182.044444F
 #define ENCODING_HEIGHT         100.F
 #define ENCODING_VOLTAGE        10.F
 #define ENCODING_CURRENT        10.F
+#define ENCODING_CTRL_GAIN      20.F
 
 #define ENCODE_PAYLOAD_THROTTLE(src, dst)       \
         dst = (uint16_t)(src)
@@ -81,8 +94,10 @@ struct ack_payload {
         do {                                    \
                 if ((src >= 0) && (src < 25.4F))                        \
                         dst = (uint8_t)(src * ENCODING_CURRENT);        \
-                else if ((src < 0) && (src > -25.4F))                   \
-                        dst = (uint8_t)(src * ENCODING_CURRENT);        \
+                else if (src > 25.4)                                    \
+                        dst = 255;                                      \
+                else                                                    \
+                        dst = 0;                                        \
         } while (0)
 #define ENCODE_PAYLOAD_REC_STATUS(src, dst)     \
         dst = (uint8_t)(src)
@@ -95,5 +110,9 @@ struct ack_payload {
                 else                            \
                         dst = (uint16_t)(src);  \
         } while (0)
+#define ENCODE_PAYLOAD_CTRL_GAIN(src, dst)      \
+        dst = (uint8_t)(src * ENCODING_CTRL_GAIN)
+#define ENCODE_PAYLOAD_MODE(src, dst)           \
+        dst = (uint8_t)(src)
 
 #endif /* NRF_PAYLOAD_H */

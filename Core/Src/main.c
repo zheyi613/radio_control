@@ -33,6 +33,7 @@
 #include "stdio.h"
 #include "string.h"
 #include "nrf24l01p.h"
+#include "nrf_payload.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,40 +43,56 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define TIMER_FREQ            50
-#define MAX_MSG_LENGTH        400
-#define ADC_CHANNEL_SIZE      4
+#define TIMER_FREQ              50
 
-enum adc_val_index {
-  JOYSTICK_LX_VAL_INDEX,
-  JOYSTICK_LY_VAL_INDEX,
-  JOYSTICK_RX_VAL_INDEX,
-  JOYSTICK_RY_VAL_INDEX
-};
+#define ADC_CHANNEL_SIZE        4
 
-enum input_magnification {
-  INPUT_16X,  /* value: -128 ~ 127 */
-  INPUT_8X,   /* -64 ~ 63 */
-  INPUT_4X,   /* -32 ~ 31 */
-  INPUT_2X,   /* -16 ~ 15 */
-};
+#define RADIO_CYCLE             1
+#define JOYSTICK_CYCLE          10
+#define PRINT_MSG_CYCLE         10
 
-#define INPUT_MAGNIFICATION   INPUT_2X
+#define JOYSTICK_RANGE          2048
+#define JOYSTICK_ZERO_RANGE     150
 
-enum PID_tuning {
-  TILT_MODE,
-  P_MODE,
-  I_MODE,
-  D_MODE
-};
+#define THROTTLE_AJUSTMENT_RANGE        20.F
+#define ANGLE_AJUSTMENT_RANGE           10.F /* degree */
+#define GAIN_AJUSTMENT_RANGE            0.1F
 
-enum {
-  NORMAL_MODE,
-  ALTITUDE_MODE
-};
+#define MAX_MOTOR_DUTY          1999
 
-#define PAYLOAD_WIDTH         32
-#define ACK_PAYLOAD_WIDTH     20
+#define JOYSTICK_TASK           (1U << 0)
+#define RADIO_TASK              (1U << 1)
+#define DECODE_ACK_TASK         (1U << 2)
+#define MSG_TASK                (1U << 3)
+                                        
+#define SET_TASK_TRIGGER(TASK)          task_trigger |= (TASK)
+#define CLEAR_TASK_TRIGGER(TASK)        task_trigger &= ~(TASK)
+#define IS_TASK_TRIGGER(TASK)           (task_trigger & (TASK))
+
+#define JOYSTICK_LX             (0)
+#define JOYSTICK_LY             (1)
+#define JOYSTICK_RX             (2)
+#define JOYSTICK_RY             (3)
+
+#define CONVERT_JOYSTICK_LEVEL(data, level)     \
+        if (data > 0) {                         \
+                level = 1;                      \
+        } else if (data < 0) {                  \
+                level = -1;                     \
+        } else {                                \
+                level = 0;                      \
+        }
+
+#define PRESS_BUTTON_L          (1U << 0)
+#define PRESS_BUTTON_R          (1U << 1)
+
+#define GAIN_REGULATION_NONE    0
+#define GAIN_REGULATION_P       1
+#define GAIN_REGULATION_I       2
+#define GAIN_REGULATION_D       3
+
+#define NORMAL_MODE             0
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -87,48 +104,54 @@ enum {
 
 /* USER CODE BEGIN PV */
 uint8_t tick;
+uint16_t adc_val[4];
+uint8_t task_trigger;
+struct payload pl;
+struct ack_payload ack_pl;
 uint32_t lost_package;
-uint8_t adc_finish;
-uint8_t tx_finish;
-uint8_t unlock;
 
-union {
-  struct {
-    uint16_t throttle;
-    int16_t roll_target; /* +-180/32768 LSB */
-    int16_t pitch_target;
-    int16_t yaw_target;
-    uint16_t height_target; /* 1mm LSB */
-    uint8_t P;           /* 0.001 LSB */
-    uint8_t I;
-    uint8_t D;
-    uint8_t mode;
-    uint8_t unlock;
-    uint8_t dummy[17];
-  } data;
-  uint8_t bytes[PAYLOAD_WIDTH];
-} payload;
+struct joystick_raw {
+  uint16_t LX;
+  uint16_t LY;
+  uint16_t RX;
+  uint16_t RY;
+} joystick_raw_data;
 
-union {
-  struct {
-    int16_t roll;
-    int16_t pitch;
-    int16_t yaw;
-    uint16_t throttle;
-    uint16_t motor[4];
-    int16_t height;  /* 0.01 m LSB, range: +-327.68 m */
-    uint8_t voltage; /* 0.1 V LSB, range: 0 ~ 17.5 V */
-    uint8_t event;
-  } data;
-  uint8_t bytes[ACK_PAYLOAD_WIDTH];
-} ack_payload;
+struct command {
+  uint16_t throttle;
+  float roll_target;
+  float pitch_target;
+  float yaw_target;
+  float height_target;
+  float P;
+  float I;
+  float D;
+  uint8_t mode;
+  uint8_t gain_regulation;
+} cmd;
+
+struct uav {
+        float roll;
+        float pitch;
+        float yaw;
+        uint16_t motor[4];
+        uint16_t throttle;
+        float height;
+        float voltage;
+        float current;
+        uint8_t rec_status;
+        uint8_t gps_sv_status;
+        uint16_t gps_pAcc;
+} uav_data;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-int8_t convert_val(uint16_t val);
-void tuning(uint8_t *param, int8_t tuning_val);
+static void joystick_task(void);
+static void radio_task(void);
+static void decode_ack_task(void);
+static void msg_task(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -172,53 +195,19 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   DWT_Init();
-
+  /* Initialize variable */
   tick = 0;
-  uint8_t last_tick = 0;
-  lost_package = 0;
-  uint8_t msg[MAX_MSG_LENGTH];
-  uint16_t len;
-  uint16_t adc_val[ADC_CHANNEL_SIZE];
-  /* payload variable */
-  int16_t tmp = 0;
-  float roll_target = 0;
-  float pitch_target = 0;
-  float yaw_target = 0;
-  float P = 1.2f;
-  float I = 0.1f;
-  float D = 0.2f;
-  uint8_t mode = NORMAL_MODE;
-  /* ack payload variable */
-  uint16_t get_throttle = 0;
-  float roll = 0.f;
-  float pitch = 0.f;
-  float yaw = 0.f;
-  uint16_t motor[4] = {0};
-  float height = 0.f;
-  float voltage = 0.f;
-  uint8_t event = 0;
-
-  int8_t joystick_RY_last_state = 0;
-  int8_t tuning_val = 0;
-
-  uint8_t SW_L = 0;
-  uint8_t SW_R = 0;
-  uint8_t SW_last_state = 0;
-  uint8_t SW_L_last_state = 0;
-  uint8_t SW_R_last_state = 0;
-  uint8_t PID_tuning = 0;
-
-  adc_finish = 0;
-  tx_finish = 0;
-  unlock = 0;
-
-  memset(payload.bytes, 0, PAYLOAD_WIDTH);
-  memset(ack_payload.bytes, 0, ACK_PAYLOAD_WIDTH);
-
-  payload.data.P = (uint8_t)(P * 20.f);
-  payload.data.I = (uint8_t)(I * 20.f);
-  payload.data.D = (uint8_t)(D * 20.f);
-
+  memset(adc_val, 0, sizeof(adc_val));
+  task_trigger = 0;
+  memset(&pl, 0, sizeof(struct payload));
+  memset(&ack_pl, 0, sizeof(struct ack_payload));
+  memset(&joystick_raw_data, 0, sizeof(struct joystick_raw));
+  memset(&cmd, 0, sizeof(struct command));
+  cmd.P = 1.2F;
+  cmd.I = 0.1F;
+  cmd.D = 0.2F;
+  memset(&uav_data, 0, sizeof(struct uav));
+  
   struct nrf24l01p_cfg nrf24l01_param = {
     .mode = PTX_MODE,
     .crc_len = CRC_TWO_BYTES,
@@ -229,7 +218,6 @@ int main(void)
     .auto_retransmit_count = 6,
     .auto_retransmit_delay = 750
   };
-
   if (nrf24l01p_init(&nrf24l01_param)) {
     while (1) {
       HAL_GPIO_TogglePin(BLUE_LED_GPIO_Port, BLUE_LED_Pin);
@@ -237,117 +225,26 @@ int main(void)
     }
   }
   HAL_TIM_Base_Start_IT(&htim3);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_val, ADC_CHANNEL_SIZE);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    while (tick == last_tick)
-      ;
-    last_tick = tick;
-    HAL_GPIO_TogglePin(TEST_GPIO_Port, TEST_Pin);
-    if (tick % 5) { /* 10 Hz */
-      if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_val, ADC_CHANNEL_SIZE)
-                        == HAL_OK) {
-        while (!adc_finish)
-          ;
-        adc_finish = 0;
-        tmp = (int16_t)payload.data.throttle;
-        tmp += convert_val(adc_val[JOYSTICK_LY_VAL_INDEX]);
-        if (tmp < 0)
-          payload.data.throttle = 0;
-        else if (tmp > 1999)
-          payload.data.throttle = 1999;
-        else
-          payload.data.throttle = (uint16_t)tmp;
+    while (1) {
+      if (IS_TASK_TRIGGER(JOYSTICK_TASK))
+        joystick_task();
+                
+      if (IS_TASK_TRIGGER(RADIO_TASK))
+        radio_task();
+                
+      if (IS_TASK_TRIGGER(DECODE_ACK_TASK))
+        decode_ack_task();
 
-        if (PID_tuning == TILT_MODE) {
-          roll_target = convert_val(adc_val[JOYSTICK_RX_VAL_INDEX]);
-          payload.data.roll_target = roll_target * 182.04444f;
-          pitch_target = -convert_val(adc_val[JOYSTICK_RY_VAL_INDEX]);
-          payload.data.pitch_target = pitch_target * 182.04444f;
-          yaw_target = convert_val(adc_val[JOYSTICK_LX_VAL_INDEX]);
-          payload.data.yaw_target = yaw_target * 182.04444f;
-        } else {
-          tuning_val = convert_val(adc_val[JOYSTICK_RY_VAL_INDEX]);
-          if (joystick_RY_last_state == 0) {
-            if (tuning_val > 0)
-              tuning_val = 1;
-            else if (tuning_val < 0)
-              tuning_val = -1;
-            
-            if (PID_tuning == P_MODE) {
-              tuning(&payload.data.P, tuning_val);
-              P = (float)payload.data.P * 0.05f;
-            } else if (PID_tuning == I_MODE) {
-              tuning(&payload.data.I, tuning_val);
-              I = (float)payload.data.I * 0.05f;
-            } else {
-              tuning(&payload.data.D, tuning_val);
-              D = (float)payload.data.D * 0.05f;
-            }
-          }
-          joystick_RY_last_state = tuning_val;
-        }
-      }
-      SW_L = !HAL_GPIO_ReadPin(SW_L_GPIO_Port, SW_L_Pin);
-        SW_R = !HAL_GPIO_ReadPin(SW_R_GPIO_Port, SW_R_Pin);
-        if (SW_L & !SW_L_last_state) {
-          mode++;
-          if (mode > 1)
-            mode = 0;
-          payload.data.mode = mode;
-        }
-        SW_L_last_state = SW_L;
-        if (SW_R & !SW_R_last_state) {
-          PID_tuning++;
-          if (PID_tuning > 3)
-            PID_tuning = 0;
-        }
-        SW_R_last_state = SW_R;
-        if (SW_L & SW_R & !SW_last_state)
-          unlock ^= 1;
-        payload.data.unlock = unlock;
-        SW_last_state = SW_L | SW_R;
+      if (IS_TASK_TRIGGER(MSG_TASK))
+        msg_task();
     }
-    nrf24l01p_transmit(payload.bytes, PAYLOAD_WIDTH);
-    while (!tx_finish)
-      ;
-    tx_finish = 0;
-
-    get_throttle = ack_payload.data.throttle;
-    roll = (float)ack_payload.data.roll * 0.005493164f;
-    pitch = (float)ack_payload.data.pitch * 0.005493164f;
-    yaw = (float)ack_payload.data.yaw * 0.005493164f;
-    motor[0] = ack_payload.data.motor[0];
-    motor[1] = ack_payload.data.motor[1];
-    motor[2] = ack_payload.data.motor[2];
-    motor[3] = ack_payload.data.motor[3];
-    height = (float)ack_payload.data.height * 0.01f;
-    voltage = (float)ack_payload.data.voltage * 0.1f;
-    event = ack_payload.data.event;
-
-    len = snprintf((char *)msg, MAX_MSG_LENGTH,
-                   "throttle: %d, r target: %.2f, "
-                   "p target: %.2f, y target: %.2f\n\r"
-                   "unlock: %d, set mode: %d, P: %.3f, I: %.3f, D: %.3f\n\r"
-                   "get throttle: %d, r: %.2f, p: %.2f, y: %.2f\n\r"
-                   "m1: %d, m2: %d, m3: %d, m4: %d\n\r"
-                   "h: %.2f, vol: %.1f, ctrl mode: %d, crash: %d\n\r"
-                   "lost package: %ld\n\r",
-                   payload.data.throttle, roll_target, pitch_target, yaw_target,
-                   payload.data.unlock, PID_tuning, P, I, D,
-                   get_throttle, roll, pitch, yaw,
-                   motor[0], motor[1], motor[2], motor[3],
-                   height, voltage, mode, event,
-                   lost_package);
-    CDC_Transmit_FS(msg, len);
-    len = snprintf((char *)msg, MAX_MSG_LENGTH, "0.0,0.0,0.0,0.0,0.0,0.0,"
-                                                "%.2f,%.2f,%.2f\n",
-                                                roll, pitch, yaw);
-    HAL_UART_Transmit(&huart1, msg, len, 10);
-    HAL_GPIO_TogglePin(TEST_GPIO_Port, TEST_Pin);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -401,56 +298,214 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+/* Interrupt callback */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == htim3.Instance) {
     tick++;
     if (tick == TIMER_FREQ)
       tick = 0;
+    
+    if (!(tick % RADIO_CYCLE))
+      SET_TASK_TRIGGER(RADIO_TASK);
+    
+    if (!(tick % PRINT_MSG_CYCLE))
+      SET_TASK_TRIGGER(MSG_TASK);
   }
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
-  adc_finish = 1;
+  static uint8_t adc_count = 0;
+  static uint32_t total[4] = {0};
+
+  adc_count++;
+
+  total[0] += (uint32_t)adc_val[0];
+  total[1] += (uint32_t)adc_val[1];
+  total[2] += (uint32_t)adc_val[2];
+  total[3] += (uint32_t)adc_val[3];
+
+  if (adc_count == JOYSTICK_CYCLE) {
+    /* Average 10 samples */
+    joystick_raw_data.LX = total[0] / JOYSTICK_CYCLE;
+    joystick_raw_data.LY = total[1] / JOYSTICK_CYCLE;
+    joystick_raw_data.RX = total[2] / JOYSTICK_CYCLE;
+    joystick_raw_data.RY = total[3] / JOYSTICK_CYCLE;
+    adc_count = 0;
+    memset(total, 0, sizeof(total));
+    SET_TASK_TRIGGER(JOYSTICK_TASK);
+  }
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == NRF_IRQ_Pin) {
-    if (nrf24l01p_tx_irq(ack_payload.bytes)) {
+    if (nrf24l01p_tx_irq((uint8_t *)&ack_pl)) {
       HAL_GPIO_WritePin(BLUE_LED_GPIO_Port, BLUE_LED_Pin, GPIO_PIN_RESET);
       lost_package++;
     } else {
       HAL_GPIO_TogglePin(BLUE_LED_GPIO_Port, BLUE_LED_Pin);
+      SET_TASK_TRIGGER(DECODE_ACK_TASK);
     }
-    tx_finish = 1;
   }
 }
 
-int8_t convert_val(uint16_t val)
+/* Task function */
+float normalize_joystick(uint16_t val)
 {
-  int8_t new_val;
+        float tmp = (float)val;
 
-  if (val > 2200 || val < 1900)
-    new_val = (2048 - (int16_t)val) >> (4 + INPUT_MAGNIFICATION);
-  else
-    new_val = 0;
-
-  return new_val;
+        if ((tmp > (JOYSTICK_RANGE + JOYSTICK_ZERO_RANGE)) ||
+            (tmp < (JOYSTICK_RANGE - JOYSTICK_ZERO_RANGE))) {
+                tmp = JOYSTICK_RANGE - tmp;
+                tmp /= JOYSTICK_RANGE;
+        } else {
+                tmp = 0;
+        }
+        return tmp;
 }
 
-void tuning(uint8_t *param, int8_t tuning_val)
-{
-  int16_t tmp;
+static void joystick_task(void) {
+  static float LX = 0.F;
+  static float LY = 0.F;
+  static float RX = 0.F;
+  static float RY = 0.F;
+  /* push: +1, pull: -1, zero: 0 */
+  static int8_t last_LX_level = 0;
+  static int8_t last_LY_level = 0;
+  static int8_t last_RX_level = 0;
+  static int8_t last_RY_level = 0;
+  static uint8_t button = 0;
+  static uint8_t last_botton = 0;
+  static int32_t tmp;
 
-  if (tuning_val == 0)
-    return;
-  tmp = (int16_t)(*param) + (int16_t)tuning_val;
-  if (tmp >= 0 && tmp < 250)
-    *param = (int8_t)tmp;
+  /* Normalize raw data */
+  LX = normalize_joystick(joystick_raw_data.LX);
+  LY = normalize_joystick(joystick_raw_data.LY);
+  RX = normalize_joystick(joystick_raw_data.RX);
+  RY = normalize_joystick(joystick_raw_data.RY);
+  button = HAL_GPIO_ReadPin(SW_L_GPIO_Port, SW_L_Pin) ? 0 : PRESS_BUTTON_L;
+  button |= HAL_GPIO_ReadPin(SW_R_GPIO_Port, SW_R_Pin) ? 0 : PRESS_BUTTON_R;
+  
+  /* Inplement botton data if it has been click once */
+  if (!button && (last_botton & PRESS_BUTTON_L)) {
+    cmd.gain_regulation++;
+    if (cmd.gain_regulation > 3)
+      cmd.gain_regulation = 0;
+  }
+  if (!button && (last_botton & PRESS_BUTTON_R)) {
+
+  }
+  last_botton = button ? PRESS_BUTTON_L : 0;
+  last_botton |= button ? PRESS_BUTTON_R : 0;
+  /* Inplement command by joystick data */
+  tmp = cmd.throttle;
+  tmp += (int32_t)(LY * THROTTLE_AJUSTMENT_RANGE);
+
+  if (tmp > MAX_MOTOR_DUTY)
+    tmp = MAX_MOTOR_DUTY;
+  else if (tmp < 0)
+    tmp = 0;
+
+  cmd.throttle = (uint16_t)tmp;
+
+  switch (cmd.gain_regulation) {
+  case GAIN_REGULATION_NONE:
+    cmd.roll_target = RX * ANGLE_AJUSTMENT_RANGE;
+    cmd.pitch_target = -RY * ANGLE_AJUSTMENT_RANGE;
+    cmd.yaw_target = LX * ANGLE_AJUSTMENT_RANGE;
+    break;
+  case GAIN_REGULATION_P:
+    if ((RY == 0) && (last_RY_level != 0))
+      cmd.P += GAIN_AJUSTMENT_RANGE * (float)last_RY_level;
+    break;
+  case GAIN_REGULATION_I:
+    if ((RY == 0) && (last_RY_level != 0))
+      cmd.I += GAIN_AJUSTMENT_RANGE * (float)last_RY_level;
+    break;
+  case GAIN_REGULATION_D:
+    if ((RY == 0) && (last_RY_level != 0))
+      cmd.D += GAIN_AJUSTMENT_RANGE * (float)last_RY_level;
+    break;
+  }
+  CONVERT_JOYSTICK_LEVEL(LX, last_LX_level);
+  CONVERT_JOYSTICK_LEVEL(LY, last_LY_level);
+  CONVERT_JOYSTICK_LEVEL(RX, last_RX_level);
+  CONVERT_JOYSTICK_LEVEL(RY, last_RY_level);
+
+  /* End task */
+  CLEAR_TASK_TRIGGER(JOYSTICK_TASK);
 }
 
+static void radio_task(void) {
+  ENCODE_PAYLOAD_THROTTLE(cmd.throttle, pl.throttle);
+  ENCODE_PAYLOAD_DEGREE(cmd.roll_target, pl.roll_target);
+  ENCODE_PAYLOAD_DEGREE(cmd.pitch_target, pl.pitch_target);
+  ENCODE_PAYLOAD_DEGREE(cmd.yaw_target, pl.yaw_target);
+  ENCODE_PAYLOAD_CTRL_GAIN(cmd.P, pl.P);
+  ENCODE_PAYLOAD_CTRL_GAIN(cmd.I, pl.I);
+  ENCODE_PAYLOAD_CTRL_GAIN(cmd.D, pl.D);
+  ENCODE_PAYLOAD_MODE(cmd.mode, pl.mode);
+
+  nrf24l01p_transmit((uint8_t *)&pl, PAYLOAD_WIDTH);
+
+  /* End task */
+  CLEAR_TASK_TRIGGER(RADIO_TASK);
+}
+
+static void decode_ack_task(void) {
+  DECODE_PAYLOAD_DEGREE(ack_pl.roll, uav_data.roll);
+  DECODE_PAYLOAD_DEGREE(ack_pl.pitch, uav_data.pitch);
+  DECODE_PAYLOAD_DEGREE(ack_pl.yaw, uav_data.yaw);
+  DECODE_PAYLOAD_DEGREE(ack_pl.motor[0], uav_data.motor[0]);
+  DECODE_PAYLOAD_DEGREE(ack_pl.motor[1], uav_data.motor[1]);
+  DECODE_PAYLOAD_DEGREE(ack_pl.motor[2], uav_data.motor[2]);
+  DECODE_PAYLOAD_DEGREE(ack_pl.motor[3], uav_data.motor[3]);
+  DECODE_PAYLOAD_THROTTLE(ack_pl.throttle, uav_data.throttle);
+  DECODE_PAYLOAD_HEIGHT(ack_pl.height, uav_data.height);
+  DECODE_PAYLOAD_VOLTAGE(ack_pl.voltage, uav_data.voltage);
+  DECODE_PAYLOAD_CURRENT(ack_pl.current, uav_data.current);
+  DECODE_PAYLOAD_REC_STATUS(ack_pl.rec_status, uav_data.rec_status);
+  DECODE_PAYLOAD_GPS_SV_STATUS(ack_pl.gps_sv_status, uav_data.gps_sv_status);
+  DECODE_PAYLOAD_GPS_PACC(ack_pl.gps_pAcc, uav_data.gps_pAcc);
+
+  /* End task */
+  CLEAR_TASK_TRIGGER(DECODE_ACK_TASK);
+}
+
+static void msg_task(void) {
+  static char msg[512];
+  static uint16_t len;
+  
+  len = snprintf(msg, 512,
+            "LX: %d, LY: %d, RX: %d, RY: %d\r\n"
+            "command:\r\n"
+            "throttle: %d, r_sp: %.2f, p_sp: %.2f, y_sp: %.2f\r\n"
+            "h_sp: %.2f, P: %.2f, I: %.2f, D: %.2f\r\n"
+            "mode: %d, gain mode: %d\r\n"
+            "uav data:\r\n"
+            "r: %.2f, p: %.2f, y: %.2f\r\n"
+            "throttle: %d, m0: %d, m1: %d, m2: %d, m3: %d\r\n"
+            "height: %.2f, V: %.1f, I: %.1f\r\n"
+            "sd_rec: %d, sv num: %d, gps pAcc: %d\r\n"
+            "lost package: %ld\r\n",
+            joystick_raw_data.LX, joystick_raw_data.LY,
+            joystick_raw_data.RX, joystick_raw_data.RY,
+            cmd.throttle, cmd.roll_target, cmd.pitch_target, cmd.yaw_target,
+            cmd.height_target, cmd.P, cmd.I, cmd.D,
+            cmd.mode, cmd.gain_regulation,
+            uav_data.roll, uav_data.pitch, uav_data.yaw,
+            uav_data.throttle, uav_data.motor[0], uav_data.motor[1],
+            uav_data.motor[2], uav_data.motor[3],
+            uav_data.height, uav_data.voltage, uav_data.current,
+            uav_data.rec_status, uav_data.gps_sv_status, uav_data.gps_pAcc,
+            lost_package);
+  CDC_Transmit_FS((uint8_t *)msg, len);
+
+  /* End task */
+  CLEAR_TASK_TRIGGER(MSG_TASK);
+}
 /* USER CODE END 4 */
 
 /**
