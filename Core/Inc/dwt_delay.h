@@ -8,10 +8,10 @@
 #ifndef __DWT_DELAY_H
 #define __DWT_DELAY_H
 
-#include "main.h"
+#include <stdint.h>
 
 void DWT_Init(void);
 void DWT_Delay(uint32_t us);
-uint32_t DWT_GetTick_us(void);
+uint32_t DWT_GetTick(void);
 
 #endif /* __DWT_DELAY_H */
