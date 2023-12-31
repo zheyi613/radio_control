@@ -46,17 +46,20 @@
 #define TIMER_FREQ              50
 
 #define ADC_CHANNEL_SIZE        4
+#define MOVING_AVG_SAMPLE       5
 
 #define RADIO_CYCLE             1
-#define JOYSTICK_CYCLE          10
-#define PRINT_MSG_CYCLE         10
+#define JOYSTICK_CYCLE          1
+#define PRINT_MSG_CYCLE         1
 
 #define JOYSTICK_RANGE          2048
 #define JOYSTICK_ZERO_RANGE     150
 
-#define THROTTLE_AJUSTMENT_RANGE        20.F
-#define ANGLE_AJUSTMENT_RANGE           10.F /* degree */
-#define GAIN_AJUSTMENT_RANGE            0.1F
+#define THROTTLE_AJUSTMENT_RANGE        10.F
+#define ANGLE_AJUSTMENT_RANGE           20.F /* degree */
+#define GAIN_AJUSTMENT_RANGE            0.05F
+#define MOTOR_AJUSTMENT_RANGE           5
+#define HEIGHT_AJUSTMENT_RANGE          0.2F
 
 #define MAX_MOTOR_DUTY          1999
 
@@ -74,24 +77,23 @@
 #define JOYSTICK_RX             (2)
 #define JOYSTICK_RY             (3)
 
-#define CONVERT_JOYSTICK_LEVEL(data, level)     \
-        if (data > 0) {                         \
-                level = 1;                      \
-        } else if (data < 0) {                  \
-                level = -1;                     \
-        } else {                                \
-                level = 0;                      \
-        }
+#define CONVERT_JOYSTICK_LEVEL(data, level) \
+  if (data > 0) {                           \
+          level = 1;                        \
+  } else if (data < 0) {                    \
+          level = -1;                       \
+  } else {                                  \
+          level = 0;                        \
+  }
 
 #define PRESS_BUTTON_L          (1U << 0)
 #define PRESS_BUTTON_R          (1U << 1)
 
-#define GAIN_REGULATION_NONE    0
-#define GAIN_REGULATION_P       1
-#define GAIN_REGULATION_I       2
-#define GAIN_REGULATION_D       3
-
-#define NORMAL_MODE             0
+#define PARAM_AJUSTMENT_NONE    0
+#define PARAM_AJUSTMENT_P       1
+#define PARAM_AJUSTMENT_I       2
+#define PARAM_AJUSTMENT_D       3
+#define PARAM_AJUSTMENT_FAULT_RATIO 4
 
 /* USER CODE END PD */
 
@@ -119,30 +121,34 @@ struct joystick_raw {
 
 struct command {
   uint16_t throttle;
-  float roll_target;
-  float pitch_target;
-  float yaw_target;
-  float height_target;
+  float sp_roll;
+  float sp_pitch;
+  float sp_yaw_rate;
+  float sp_height;
   float P;
   float I;
   float D;
+  float fault_radio;
   uint8_t mode;
-  uint8_t gain_regulation;
+  uint8_t param_ajustment;
 } cmd;
 
 struct uav {
-        float roll;
-        float pitch;
-        float yaw;
-        uint16_t motor[4];
-        uint16_t throttle;
-        float height;
-        float voltage;
-        float current;
-        uint8_t rec_status;
-        uint8_t gps_sv_status;
-        uint16_t gps_pAcc;
+  float roll;
+  float pitch;
+  float yaw;
+  uint16_t motor[4];
+  uint16_t throttle;
+  float height;
+  float voltage;
+  float current;
+  uint8_t rec_status;
+  uint8_t gps_sv_status;
+  uint16_t gps_pAcc;
 } uav_data;
+
+volatile uint8_t tx_finish;
+volatile uint8_t tx_timeout;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -203,10 +209,12 @@ int main(void)
   memset(&ack_pl, 0, sizeof(struct ack_payload));
   memset(&joystick_raw_data, 0, sizeof(struct joystick_raw));
   memset(&cmd, 0, sizeof(struct command));
-  cmd.P = 1.2F;
-  cmd.I = 0.1F;
-  cmd.D = 0.2F;
+  cmd.P = 0.5F;
+  cmd.I = 0.05F;
+  cmd.D = 20.F;
   memset(&uav_data, 0, sizeof(struct uav));
+
+  HAL_Delay(1000);
   
   struct nrf24l01p_cfg nrf24l01_param = {
     .mode = PTX_MODE,
@@ -311,6 +319,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     
     if (!(tick % PRINT_MSG_CYCLE))
       SET_TASK_TRIGGER(MSG_TASK);
+    tx_timeout++;
   }
 }
 
@@ -327,7 +336,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
   total[3] += (uint32_t)adc_val[3];
 
   if (adc_count == JOYSTICK_CYCLE) {
-    /* Average 10 samples */
+    /* Average temperory samples */
     joystick_raw_data.LX = total[0] / JOYSTICK_CYCLE;
     joystick_raw_data.LY = total[1] / JOYSTICK_CYCLE;
     joystick_raw_data.RX = total[2] / JOYSTICK_CYCLE;
@@ -348,22 +357,23 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
       HAL_GPIO_TogglePin(BLUE_LED_GPIO_Port, BLUE_LED_Pin);
       SET_TASK_TRIGGER(DECODE_ACK_TASK);
     }
+    tx_finish = 1;
   }
 }
 
 /* Task function */
 float normalize_joystick(uint16_t val)
 {
-        float tmp = (float)val;
+  float tmp = (float)val;
 
-        if ((tmp > (JOYSTICK_RANGE + JOYSTICK_ZERO_RANGE)) ||
-            (tmp < (JOYSTICK_RANGE - JOYSTICK_ZERO_RANGE))) {
-                tmp = JOYSTICK_RANGE - tmp;
-                tmp /= JOYSTICK_RANGE;
-        } else {
-                tmp = 0;
-        }
-        return tmp;
+  if ((tmp > (JOYSTICK_RANGE + JOYSTICK_ZERO_RANGE)) ||
+      (tmp < (JOYSTICK_RANGE - JOYSTICK_ZERO_RANGE))) {
+          tmp = JOYSTICK_RANGE - tmp;
+          tmp /= JOYSTICK_RANGE;
+  } else {
+          tmp = 0;
+  }
+  return tmp;
 }
 
 static void joystick_task(void) {
@@ -388,17 +398,20 @@ static void joystick_task(void) {
   button = HAL_GPIO_ReadPin(SW_L_GPIO_Port, SW_L_Pin) ? 0 : PRESS_BUTTON_L;
   button |= HAL_GPIO_ReadPin(SW_R_GPIO_Port, SW_R_Pin) ? 0 : PRESS_BUTTON_R;
   
-  /* Inplement botton data if it has been click once */
-  if (!button && (last_botton & PRESS_BUTTON_L)) {
-    cmd.gain_regulation++;
-    if (cmd.gain_regulation > 3)
-      cmd.gain_regulation = 0;
+  /* Inplement botton data if it has been click once (failing edge) */
+  if (!(button & PRESS_BUTTON_L) && (last_botton & PRESS_BUTTON_L)) {
+    cmd.mode++;
+    if (cmd.mode > 1) {
+      cmd.mode = 0;
+    }
   }
-  if (!button && (last_botton & PRESS_BUTTON_R)) {
-
+  if (!(button & PRESS_BUTTON_R) && (last_botton & PRESS_BUTTON_R)) { 
+    cmd.param_ajustment++;
+    if (cmd.param_ajustment > 4)
+      cmd.param_ajustment = 0;
   }
-  last_botton = button ? PRESS_BUTTON_L : 0;
-  last_botton |= button ? PRESS_BUTTON_R : 0;
+  last_botton = (button & PRESS_BUTTON_L) ? PRESS_BUTTON_L : 0;
+  last_botton |= (button & PRESS_BUTTON_R) ? PRESS_BUTTON_R : 0;
   /* Inplement command by joystick data */
   tmp = cmd.throttle;
   tmp += (int32_t)(LY * THROTTLE_AJUSTMENT_RANGE);
@@ -410,25 +423,54 @@ static void joystick_task(void) {
 
   cmd.throttle = (uint16_t)tmp;
 
-  switch (cmd.gain_regulation) {
-  case GAIN_REGULATION_NONE:
-    cmd.roll_target = RX * ANGLE_AJUSTMENT_RANGE;
-    cmd.pitch_target = -RY * ANGLE_AJUSTMENT_RANGE;
-    cmd.yaw_target = LX * ANGLE_AJUSTMENT_RANGE;
+  switch (cmd.param_ajustment) {
+  case PARAM_AJUSTMENT_NONE:
+    cmd.sp_roll = RX * ANGLE_AJUSTMENT_RANGE;
+    cmd.sp_pitch = -RY * ANGLE_AJUSTMENT_RANGE;
+    /* Yaw setpoint(on uav) = yaw(on uav) + yaw_target(radio control) 
+     * yaw_target = LX * ANGLE_AJUSTMENT_RANGE / TIMER_FREQ * RADIO_CYCLE
+     */
+    cmd.sp_yaw_rate = LX * ANGLE_AJUSTMENT_RANGE / TIMER_FREQ * RADIO_CYCLE;
     break;
-  case GAIN_REGULATION_P:
-    if ((RY == 0) && (last_RY_level != 0))
-      cmd.P += GAIN_AJUSTMENT_RANGE * (float)last_RY_level;
+  case PARAM_AJUSTMENT_P:
+    if ((RY == 0) && (last_RY_level != 0)) {
+      tmp = (int32_t)(cmd.P / GAIN_AJUSTMENT_RANGE);
+      tmp += (int32_t)last_RY_level;
+      cmd.P = tmp * GAIN_AJUSTMENT_RANGE;
+    }
+    if (cmd.P < 0)
+      cmd.P = 0;
     break;
-  case GAIN_REGULATION_I:
-    if ((RY == 0) && (last_RY_level != 0))
-      cmd.I += GAIN_AJUSTMENT_RANGE * (float)last_RY_level;
+  case PARAM_AJUSTMENT_I:
+    if ((RY == 0) && (last_RY_level != 0)) {
+      tmp = (int32_t)(cmd.I / GAIN_AJUSTMENT_RANGE);
+      tmp += (int32_t)last_RY_level;
+      cmd.I = tmp * GAIN_AJUSTMENT_RANGE;
+    }
+    if (cmd.I < 0)
+      cmd.I = 0;
     break;
-  case GAIN_REGULATION_D:
-    if ((RY == 0) && (last_RY_level != 0))
-      cmd.D += GAIN_AJUSTMENT_RANGE * (float)last_RY_level;
+  case PARAM_AJUSTMENT_D:
+    if ((RY == 0) && (last_RY_level != 0)){
+      tmp = (int32_t)cmd.D;
+      tmp += (int32_t)last_RY_level;
+      cmd.D = tmp;
+    }
+    if (cmd.D < 0)
+      cmd.D = 0;
     break;
-  }
+  case PARAM_AJUSTMENT_FAULT_RATIO:
+    if ((RY == 0) && (last_RY_level != 0)) {
+      tmp = (int32_t)(cmd.fault_radio / GAIN_AJUSTMENT_RANGE);
+      tmp += (int32_t)last_RY_level;
+      cmd.fault_radio = (float)tmp * GAIN_AJUSTMENT_RANGE;
+    }
+    if (cmd.fault_radio < 0)
+      cmd.fault_radio = 0;
+    else if (cmd.fault_radio > 1)
+      cmd.fault_radio = 1;
+    break;
+}
   CONVERT_JOYSTICK_LEVEL(LX, last_LX_level);
   CONVERT_JOYSTICK_LEVEL(LY, last_LY_level);
   CONVERT_JOYSTICK_LEVEL(RX, last_RX_level);
@@ -440,15 +482,23 @@ static void joystick_task(void) {
 
 static void radio_task(void) {
   ENCODE_PAYLOAD_THROTTLE(cmd.throttle, pl.throttle);
-  ENCODE_PAYLOAD_DEGREE(cmd.roll_target, pl.roll_target);
-  ENCODE_PAYLOAD_DEGREE(cmd.pitch_target, pl.pitch_target);
-  ENCODE_PAYLOAD_DEGREE(cmd.yaw_target, pl.yaw_target);
-  ENCODE_PAYLOAD_CTRL_GAIN(cmd.P, pl.P);
-  ENCODE_PAYLOAD_CTRL_GAIN(cmd.I, pl.I);
-  ENCODE_PAYLOAD_CTRL_GAIN(cmd.D, pl.D);
+  ENCODE_PAYLOAD_DEGREE(cmd.sp_roll, pl.sp_roll);
+  ENCODE_PAYLOAD_DEGREE(cmd.sp_pitch, pl.sp_pitch);
+  ENCODE_PAYLOAD_DEGREE(cmd.sp_yaw_rate, pl.sp_yaw_rate);
+  ENCODE_PAYLOAD_HEIGHT(cmd.sp_height, pl.sp_height);
+  ENCODE_PAYLOAD_CTRL_PI_GAIN(cmd.P, pl.P);
+  ENCODE_PAYLOAD_CTRL_PI_GAIN(cmd.I, pl.I);
+  ENCODE_PAYLOAD_CTRL_D_GAIN(cmd.D, pl.D);
   ENCODE_PAYLOAD_MODE(cmd.mode, pl.mode);
+  ENCODE_PAYLOAD_FAULT_RATIO(cmd.fault_radio, pl.fault_ratio);
 
   nrf24l01p_transmit((uint8_t *)&pl, PAYLOAD_WIDTH);
+  tx_finish = 0;
+  tx_timeout = 0;
+
+  while ((tx_finish == 0) && (tx_timeout < 5));
+
+  
 
   /* End task */
   CLEAR_TASK_TRIGGER(RADIO_TASK);
@@ -458,10 +508,10 @@ static void decode_ack_task(void) {
   DECODE_PAYLOAD_DEGREE(ack_pl.roll, uav_data.roll);
   DECODE_PAYLOAD_DEGREE(ack_pl.pitch, uav_data.pitch);
   DECODE_PAYLOAD_DEGREE(ack_pl.yaw, uav_data.yaw);
-  DECODE_PAYLOAD_DEGREE(ack_pl.motor[0], uav_data.motor[0]);
-  DECODE_PAYLOAD_DEGREE(ack_pl.motor[1], uav_data.motor[1]);
-  DECODE_PAYLOAD_DEGREE(ack_pl.motor[2], uav_data.motor[2]);
-  DECODE_PAYLOAD_DEGREE(ack_pl.motor[3], uav_data.motor[3]);
+  DECODE_PAYLOAD_MOTOR(ack_pl.motor[0], uav_data.motor[0]);
+  DECODE_PAYLOAD_MOTOR(ack_pl.motor[1], uav_data.motor[1]);
+  DECODE_PAYLOAD_MOTOR(ack_pl.motor[2], uav_data.motor[2]);
+  DECODE_PAYLOAD_MOTOR(ack_pl.motor[3], uav_data.motor[3]);
   DECODE_PAYLOAD_THROTTLE(ack_pl.throttle, uav_data.throttle);
   DECODE_PAYLOAD_HEIGHT(ack_pl.height, uav_data.height);
   DECODE_PAYLOAD_VOLTAGE(ack_pl.voltage, uav_data.voltage);
@@ -481,9 +531,9 @@ static void msg_task(void) {
   len = snprintf(msg, 512,
             "LX: %d, LY: %d, RX: %d, RY: %d\r\n"
             "command:\r\n"
-            "throttle: %d, r_sp: %.2f, p_sp: %.2f, y_sp: %.2f\r\n"
-            "h_sp: %.2f, P: %.2f, I: %.2f, D: %.2f\r\n"
-            "mode: %d, gain mode: %d\r\n"
+            "throttle: %d, sp_r: %.2f, sp_p: %.2f, sp yaw rate: %.2f\r\n"
+            "sp_h: %.2f, P1: %.2f, I1: %.2f, D1: %.2f, fault radio: %.2f\r\n"
+            "mode: %d, param ajustment mode: %d\r\n"
             "uav data:\r\n"
             "r: %.2f, p: %.2f, y: %.2f\r\n"
             "throttle: %d, m0: %d, m1: %d, m2: %d, m3: %d\r\n"
@@ -492,9 +542,9 @@ static void msg_task(void) {
             "lost package: %ld\r\n",
             joystick_raw_data.LX, joystick_raw_data.LY,
             joystick_raw_data.RX, joystick_raw_data.RY,
-            cmd.throttle, cmd.roll_target, cmd.pitch_target, cmd.yaw_target,
-            cmd.height_target, cmd.P, cmd.I, cmd.D,
-            cmd.mode, cmd.gain_regulation,
+            cmd.throttle, cmd.sp_roll, cmd.sp_pitch, cmd.sp_yaw_rate,
+            cmd.sp_height, cmd.P, cmd.I, cmd.D, cmd.fault_radio,
+            cmd.mode, cmd.param_ajustment,
             uav_data.roll, uav_data.pitch, uav_data.yaw,
             uav_data.throttle, uav_data.motor[0], uav_data.motor[1],
             uav_data.motor[2], uav_data.motor[3],
@@ -502,6 +552,9 @@ static void msg_task(void) {
             uav_data.rec_status, uav_data.gps_sv_status, uav_data.gps_pAcc,
             lost_package);
   CDC_Transmit_FS((uint8_t *)msg, len);
+  len = snprintf(msg, 512, "0.0,0.0,0.0,0.0,0.0,0.0,%.2f,%.2f,%.2f\n",
+                           uav_data.roll, uav_data.pitch, uav_data.yaw);
+  HAL_UART_Transmit(&huart1, (uint8_t *)msg, len, 5);
 
   /* End task */
   CLEAR_TASK_TRIGGER(MSG_TASK);
